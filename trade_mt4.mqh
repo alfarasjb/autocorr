@@ -4,6 +4,8 @@ class CAutoCorrTrade : CTradeOps {
    
    protected:
    private:
+      // REBALANCE
+      double         day_start_balance, day_volume_allocation;
    public: 
       // ACCOUNT PROPERTIES
       double         ACCOUNT_CUTOFF;
@@ -11,6 +13,7 @@ class CAutoCorrTrade : CTradeOps {
       // SYMBOL PROPERTIES
       double         tick_value, trade_points, contract_size;
       int            digits;
+      
       
       
       CAutoCorrTrade(); 
@@ -22,11 +25,18 @@ class CAutoCorrTrade : CTradeOps {
       void           InitializeSymbolProperties();
       void           InitializeAccounts();
       double         CalcLot();
+      void           ReBalance();
       
       double         TICK_VALUE()      { return tick_value; }
       double         TRADE_POINTS()    { return trade_points; }
       int            DIGITS()          { return digits; }
       double         CONTRACT()        { return contract_size; }
+      
+      double         DAY_START_BALANCE()                    { return day_start_balance; }
+      double         DAY_VOLUME_ALLOCATION()                { return day_volume_allocation; }
+         
+      void           DAY_START_BALANCE(double balance)      { day_start_balance  =  balance; }
+      void           DAY_VOLUME_ALLOCATION(double volume)   { day_volume_allocation = volume; }
    
       // MAIN 
       int            SendOrder();
@@ -44,7 +54,9 @@ class CAutoCorrTrade : CTradeOps {
       void           CheckOrderDeadline();
       int            OrdersEA();
       void           SetTradeWindow(datetime trade_datetime);
-      
+      double         PLToday();
+      double         EntryCandleOpen();
+      int            ShiftToEntry();
       
       double         ValueAtRisk();
       double         TradeDiff();
@@ -72,6 +84,7 @@ class CAutoCorrTrade : CTradeOps {
       bool           TradeInPool(int ticket);
       int            RemoveTradeFromPool(int ticket);
       void           ClearPositions();
+      bool           TradeIsOpen(int ticket);
       
       // UTILITIES
       int            logger(string message, string function, bool notify = false, bool debug = false);
@@ -113,7 +126,7 @@ void              CAutoCorrTrade::SetRiskProfile(void) {
    RISK_PROFILE.RP_order_send_method   = InpRPOrderSendMethod;
    RISK_PROFILE.RP_timeframe           = InpRPTimeframe;   
    RISK_PROFILE.RP_market_split        = InpRPMarketSplit;
-   
+   RISK_PROFILE.RP_trade_logic         = InpRPTradeLogic;
 }
 
 void              CAutoCorrTrade::SetTradeWindow(datetime trade_datetime) {
@@ -125,6 +138,44 @@ void              CAutoCorrTrade::SetTradeWindow(datetime trade_datetime) {
    
    TRADES_ACTIVE.trade_open_datetime      = trade_datetime;
    TRADES_ACTIVE.trade_close_datetime     = StructToTime(trade_close_struct);
+}
+
+double            CAutoCorrTrade::PLToday(void) {
+
+   // iterate through history, check order close date. if today, add to current pl 
+   
+   int      hist_total     = PosHistTotal(); 
+   double   pl             = 0;
+   for (int i = 0; i < hist_total; i++) {
+      int s = OP_HistorySelectByIndex(i);
+      if (!UTIL_DATE_MATCH(UTIL_DATE_TODAY(), PosCloseTime())) continue; 
+      pl += PosProfit();
+   }
+   return pl;
+}
+
+
+void              CAutoCorrTrade::ReBalance(void) {
+
+   // CALC LOT ALLOCATION FOR THE DAY
+   double   pl_today    = PLToday();
+   
+   DAY_START_BALANCE(UTIL_ACCOUNT_BALANCE() - pl_today);
+   DAY_VOLUME_ALLOCATION(CalcLot());
+   
+   ENUM_DIRECTION direction_today   = TradeDirection();
+   
+   logger(StringFormat("Day Start Balance: %f, Day Volume: %f, Day Running PL: %f", 
+      DAY_START_BALANCE(), 
+      DAY_VOLUME_ALLOCATION(), 
+      pl_today), __FUNCTION__, false, InpDebugLogging);
+
+
+   logger(StringFormat("Previous Day Close: %f, Previous Day Open: %f, Direction Today: %s", 
+      UTIL_PREVIOUS_DAY_CLOSE(), 
+      UTIL_PREVIOUS_DAY_OPEN(), 
+      EnumToString(direction_today)), __FUNCTION__, false, InpDebugLogging);
+
 }
 
 int               CAutoCorrTrade::OrdersEA(void) {
@@ -198,6 +249,7 @@ void              CAutoCorrTrade::CheckOrderDeadline(void) {
    for (int i = 0; i < active; i++) {
       ActivePosition pos   = TRADES_ACTIVE.active_positions[i];
       if (pos.pos_deadline > TimeCurrent()) continue; 
+      if (!TradeIsOpen(pos.pos_ticket)) continue;
       int c = OP_CloseTrade(pos.pos_ticket);   
       if (c) logger(StringFormat("Trade Closed: %i", PosTicket()), __FUNCTION__, true);
    }
@@ -213,17 +265,42 @@ void              CAutoCorrTrade::AppendActivePosition(ActivePosition &active_po
 
 }
 
+bool              CAutoCorrTrade::TradeIsOpen(int ticket) {
+   
+   int s    = OP_OrderSelectByTicket(ticket);
+   if (PosCloseTime() > 0) return false; 
+   return true;
+   
+}
+
 int               CAutoCorrTrade::CloseOrder(void) {
-   //Print("CLOSE: ", TimeCurrent());
-   int c = OP_OrdersCloseAll();
-   if (c > 0) ClearPositions();
+
+   if (PosTotal() == 0) return 0;
+   int num_active_positions = NumActivePositions(); 
+   int tickets[];
+   
+   for (int i = 0; i < num_active_positions; i++) {
+      int pos_ticket = TRADES_ACTIVE.active_positions[i].pos_ticket;
+      if (!TradeIsOpen(pos_ticket)) continue;
+      int size = ArraySize(tickets);
+      ArrayResize(tickets, size+1);
+      tickets[size]  = pos_ticket;
+      logger(StringFormat("Added %i to close.", pos_ticket), __FUNCTION__, false, InpDebugLogging);
+   }
+   //logger(StringFormat("Added %i ticket/s to close", ArraySize(tickets)), __FUNCTION__, false, InpDebugLogging);
+   int target_to_close  = ArraySize(tickets);
+   int c = OP_OrdersCloseBatch(tickets);
+   if (c == 0) {
+      ClearPositions();
+      logger(StringFormat("Total Batch Closed: %i.", target_to_close), __FUNCTION__, false, InpDebugLogging);
+   }
    return 1;
 
 }
 double            CAutoCorrTrade::CalcLot(void) {
    
    double      risk_amount_scale_factor   = InpRiskAmount / RISK_PROFILE.RP_amount; 
-   double      scaled_lot                 = (RISK_PROFILE.RP_lot * InpAllocation * risk_amount_scale_factor) * TICK_VALUE() * (1 / TRADE_POINTS()) * (1 / CONTRACT());
+   double      scaled_lot                 = (RISK_PROFILE.RP_lot * InpAllocation * risk_amount_scale_factor * (1 / TICK_VALUE())); // DO NOT CHANGE
    
    scaled_lot  = scaled_lot > InpMaxLot ? InpMaxLot : scaled_lot; 
    
@@ -283,8 +360,8 @@ bool              CAutoCorrTrade::IsNewDay(void) {
 TradeParams       CAutoCorrTrade::TradeParamsLong(ENUM_ORDER_SEND_METHOD method) {
    
    TradeParams PARAMS; 
-   PARAMS.entry_price   = method == MODE_MARKET ? UTIL_PRICE_ASK() : method == MODE_PENDING ? UTIL_LAST_CANDLE_OPEN() : 0;
-   PARAMS.sl_price      = PARAMS.entry_price - (RISK_PROFILE.RP_amount / (RISK_PROFILE.RP_lot * TICK_VALUE() * (1 / TRADE_POINTS())));
+   PARAMS.entry_price   = method == MODE_MARKET ? UTIL_PRICE_ASK() : method == MODE_PENDING ? EntryCandleOpen() : 0;
+   PARAMS.sl_price      = PARAMS.entry_price - TradeDiff();
    PARAMS.tp_price      = 0;
    PARAMS.volume        = CalcLot();
    
@@ -295,20 +372,33 @@ TradeParams       CAutoCorrTrade::TradeParamsLong(ENUM_ORDER_SEND_METHOD method)
 TradeParams       CAutoCorrTrade::TradeParamsShort(ENUM_ORDER_SEND_METHOD method) {
    
    TradeParams PARAMS;
-   PARAMS.entry_price   = method == MODE_MARKET ? UTIL_PRICE_BID() : method == MODE_PENDING ? UTIL_PRICE_ASK() : 0; 
-   PARAMS.sl_price      = PARAMS.entry_price + ((RISK_PROFILE.RP_amount) / (RISK_PROFILE.RP_lot * TICK_VALUE() * (1 / TRADE_POINTS())));
+   PARAMS.entry_price   = method == MODE_MARKET ? UTIL_PRICE_BID() : method == MODE_PENDING ? EntryCandleOpen() : 0; 
+   PARAMS.sl_price      = PARAMS.entry_price + TradeDiff();
    PARAMS.tp_price      = 0;
    PARAMS.volume        = CalcLot();
-   Print("Bid: %f, Open: %f", UTIL_PRICE_BID(), UTIL_LAST_CANDLE_OPEN());
+   
+   //Print("Bid: %f, Open: %f", UTIL_PRICE_BID(), UTIL_LAST_CANDLE_OPEN());
    //PrintFormat("RP LOT: %f, Tick Val: %f, Trade Points: %f", RISK_PROFILE.RP_lot, TICK_VALUE(), TRADE_POINTS());
    return PARAMS;
    
 }
 
 ENUM_DIRECTION    CAutoCorrTrade::TradeDirection(void) {
+   double previous_day_diff      = PreviousDayTradeDiff(); 
    
-   if (PreviousDayTradeDiff() > 0) return LONG; 
-   return SHORT;
+   if (previous_day_diff == 0) return INVALID; 
+   
+   switch(RISK_PROFILE.RP_trade_logic) {
+      case MODE_FOLLOW: 
+         if (PreviousDayTradeDiff() > 0) return LONG; 
+         return SHORT;
+      case MODE_COUNTER:
+         if (PreviousDayTradeDiff() > 0) return SHORT;
+         return LONG; 
+      default:
+         break;
+   }
+   return INVALID; 
 }
 
 
@@ -338,7 +428,9 @@ int               CAutoCorrTrade::SendMarketOrder(void) {
          order_type  = ORDER_TYPE_SELL;
          PARAMS      = TradeParamsShort(MODE_MARKET);
          break;
-         
+      case INVALID:
+         logger("Invalid Direction", __FUNCTION__, false, InpDebugLogging);
+         return -1;  
       default:
          // ORDER FAILED 
          return -1; 
@@ -380,6 +472,9 @@ int               CAutoCorrTrade::SendPendingOrder(void) {
          order_type  = ORDER_TYPE_SELL_LIMIT;
          PARAMS      = TradeParamsShort(MODE_PENDING);
          break;
+      case INVALID:
+         logger("Invalid Direction." , __FUNCTION__, false, InpDebugLogging);
+         return -1;
       default:
          // ORDER FAILED 
          return -1;
@@ -475,7 +570,7 @@ bool           CAutoCorrTrade::MinimumEquity(void) {
 
 bool           CAutoCorrTrade::ValidTradeOpen(void) {
    
-   if (IsTradeWindow() && OrdersTotal() == 0 && TRADES_ACTIVE.orders_today == 0) return true;
+   if (IsTradeWindow() && NumActivePositions() == 0 && TRADES_ACTIVE.orders_today == 0) return true;
    return false;
    
 }
@@ -497,6 +592,9 @@ bool           CAutoCorrTrade::PreEntry(void) {
 
 }
 
+int            CAutoCorrTrade::ShiftToEntry(void)              { return iBarShift(Symbol(), PERIOD_CURRENT, TRADE_QUEUE.curr_trade_open); }
+
+double         CAutoCorrTrade::EntryCandleOpen(void)           { return iOpen(Symbol(), PERIOD_CURRENT, ShiftToEntry()); }
 
 int            CAutoCorrTrade::NumActivePositions(void)        { return ArraySize(TRADES_ACTIVE.active_positions); }
 
@@ -507,6 +605,6 @@ void           CAutoCorrTrade::errors(string error_message)    { Print("ERROR: "
 void           CAutoCorrTrade::AddOrderToday(void)             { TRADES_ACTIVE.orders_today++; }
 void           CAutoCorrTrade::ClearOrdersToday(void)          { TRADES_ACTIVE.orders_today = 0;}
 
-double         CAutoCorrTrade::TradeDiff(void)                 { return ((RISK_PROFILE.RP_amount) / (RISK_PROFILE.RP_lot * TICK_VALUE() * (1 / TRADE_POINTS()))); }
-double         CAutoCorrTrade::TradeDiffPoints(void)           { return ((RISK_PROFILE.RP_amount) / (RISK_PROFILE.RP_lot * TICK_VALUE())); }
+double         CAutoCorrTrade::TradeDiff(void)                 { return ((RISK_PROFILE.RP_amount) / (RISK_PROFILE.RP_lot * (1 / TRADE_POINTS()))); }
+double         CAutoCorrTrade::TradeDiffPoints(void)           { return (((RISK_PROFILE.RP_amount) / (RISK_PROFILE.RP_lot))); }
 double         CAutoCorrTrade::ValueAtRisk(void)               { return CalcLot() * TradeDiffPoints() * TICK_VALUE(); }

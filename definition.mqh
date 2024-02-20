@@ -13,7 +13,7 @@ TODOS
 // ========== ENUM ========== // 
 
 enum ENUM_DIRECTION {
-   LONG, SHORT
+   LONG, SHORT, INVALID
 };
 
 enum ENUM_TRADE_MANAGEMENT {
@@ -28,7 +28,9 @@ enum ENUM_ORDER_SEND_METHOD {
    MODE_MARKET, MODE_PENDING, MODE_SPLIT
 };
 
-
+enum ENUM_TRADE_LOGIC {
+   MODE_FOLLOW, MODE_COUNTER
+};
 
 // =========== STRUCT ========== // 
 
@@ -37,6 +39,7 @@ struct RiskProfile {
    int                     RP_half_life; 
    ENUM_TIMEFRAMES         RP_timeframe; 
    ENUM_ORDER_SEND_METHOD  RP_order_send_method;
+   ENUM_TRADE_LOGIC        RP_trade_logic;
 
 } RISK_PROFILE;
 
@@ -69,8 +72,10 @@ input float                   InpRPRiskPercent     = 1; // RISK PROFILE: RISK PE
 input float                   InpRPLot             = 10; // RISK PROFILE: LOT
 input int                     InpRPHalfLife        = 4; // RISK PROFILE: HALF LIFE
 input ENUM_TIMEFRAMES         InpRPTimeframe       = PERIOD_M30; // RISK PROFILE: TIMEFRAME
-input ENUM_ORDER_SEND_METHOD  InpRPOrderSendMethod = MODE_SPLIT; // RISK PROFILE: ORDER SEND METHOD
+input ENUM_ORDER_SEND_METHOD  InpRPOrderSendMethod = MODE_PENDING; // RISK PROFILE: ORDER SEND METHOD
 input float                   InpRPMarketSplit     = 0.5; // RISK PROFILE: SCALE FACTOR 
+input ENUM_TRADE_LOGIC        InpRPTradeLogic      = MODE_FOLLOW; // RISK PROFILE: TRADE LOGIC
+
 
 input string                  InpEntry             = " ========== ENTRY WINDOW =========="; //
 input bool                    InpLoadFromFile      = false; // LOAD FROM FILE

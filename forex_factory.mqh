@@ -91,7 +91,7 @@ int         CNewsEvents::FetchData(void){
    
    if (!FileExists(file_path)) {
       PrintFormat("%s: File %s not found. Downloading from forex factory.", __FUNCTION__, file_path);
-      if (DownloadNews(file_name, InpNewsSource) == -1) PrintFormat("%s: Download Failed. Error: %i", __FUNCTION__, GetLastError());
+      if (DownloadNews(file_path, InpNewsSource) == -1) PrintFormat("%s: Download Failed. Error: %i", __FUNCTION__, GetLastError());
    }
    else PrintFormat("%s: File %s found", __FUNCTION__, file_path);
    
@@ -105,6 +105,7 @@ int         CNewsEvents::FetchData(void){
    }
    
    GetNewsSymbolToday();
+   ClearHandle();
    return NumNews();
 }
 
@@ -260,7 +261,7 @@ int         CNewsEvents::GetHighImpactNewsInEntryWindow(datetime entry_open,date
       if (news_time > entry_close) continue; // after 
       AppendToNews(NEWS_SYMBOL_TODAY[i], NEWS_IN_TRADING_WINDOW);
    }
-   return ArraySize(NEWS_IN_TRADING_WINDOW);
+   return NumNewsInWindow();
 }
 
 bool        CNewsEvents::HighImpactNewsInEntryWindow(void){
@@ -271,14 +272,13 @@ bool        CNewsEvents::HighImpactNewsInEntryWindow(void){
 }
 
 int         CNewsEvents::AppendToNews(SCalendarEvent &event, SCalendarEvent &news_data[]){
- 
    
    int size = ArraySize(news_data);
    ArrayResize(news_data, size + 1);
    news_data[size] = event; 
    
    
-   return NumNews();
+   return ArraySize(news_data);
 }
 
 

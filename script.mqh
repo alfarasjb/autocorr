@@ -19,14 +19,14 @@ CExport                    export_hist("autocorrelation");
 CNewsEvents                news_events();
 CCalendarHistoryLoader     calendar_loader;
 
-
 int OnInit()
   {
 //---
+   
    autocorr_trade.SetRiskProfile();
    autocorr_trade.InitializeSymbolProperties();
    autocorr_trade.InitializeTradeOpsProperties();
-   
+   autocorr_trade.ReBalance();
    
    int num_news_data    = news_events.FetchData();
    
@@ -38,18 +38,23 @@ int OnInit()
    
    int events_in_window = news_events.GetHighImpactNewsInEntryWindow(TRADE_QUEUE.curr_trade_open, TRADE_QUEUE.curr_trade_close);
    
-   autocorr_trade.logger(StringFormat("Events In Window: %i", news_events.NumNewsInWindow()), __FUNCTION__);
+   autocorr_trade.logger(StringFormat("Num Events In Window: %i, Any: %s", news_events.NumNewsInWindow(), (string) news_events.HighImpactNewsInEntryWindow()), __FUNCTION__);
    
    TerminalStatus();
    
    EventsInWindow();
    
+   autocorr_trade.CheckOrderDeadline();
+   autocorr_trade.OrdersEA();
+   if (autocorr_trade.ValidTradeOpen() && !news_events.HighImpactNewsInEntryWindow())  autocorr_trade.SendOrder();
+   ShowComments();
    return(INIT_SUCCEEDED);
    
   }
   
   
-  
+
+
 void OnDeinit(const int reason)
   {
 //---
@@ -107,16 +112,18 @@ LOOP FUNCTIONS
       int   positions_added   = autocorr_trade.OrdersEA();
       
       if (autocorr_trade.IsTradeWindow()) {
-         autocorr_trade.logger(StringFormat("Checked Order Pool. %i Position/s Found.", positions_added), __FUNCTION__);
-         autocorr_trade.logger(StringFormat("%i Order/s in Active List", autocorr_trade.NumActivePositions()), __FUNCTION__);
+         autocorr_trade.logger(StringFormat("Checked Order Pool. %i Position/s Found.", positions_added), __FUNCTION__, false, InpDebugLogging);
+         autocorr_trade.logger(StringFormat("%i Order/s in Active List", autocorr_trade.NumActivePositions()), __FUNCTION__, false, InpDebugLogging);
       }
       
       if (autocorr_trade.IsNewDay()) { 
          autocorr_trade.ClearOrdersToday();
          // REBALANCE HERE 
          // ADD: TRADING WINDOW START HOUR
+         
       }
       if (autocorr_trade.PreEntry()) {
+         autocorr_trade.ReBalance();
          if (IsTesting()) {
             if (calendar_loader.IsNewYear()) calendar_loader.LoadCSV(HIGH);
             
@@ -136,17 +143,42 @@ LOOP FUNCTIONS
          
          EventsInWindow();
       }
+      ShowComments();
    }
+   
 }
   
   
 // ========== MISC ========== // 
 
+void     ShowComments() {
+
+   Comment(
+      StringFormat("Previous Day Close:      %f\n", UTIL_PREVIOUS_DAY_CLOSE()),
+      StringFormat("Previous Day Open:       %f\n", UTIL_PREVIOUS_DAY_OPEN()),
+      StringFormat("Direction Today:         %s\n\n", EnumToString(autocorr_trade.TradeDirection())),
+      StringFormat("Day Start Balance:       %.2f\n", autocorr_trade.DAY_START_BALANCE()),
+      StringFormat("Day Volume:              %.2f\n", autocorr_trade.DAY_VOLUME_ALLOCATION()),
+      StringFormat("VAR:                     %.2f\n", autocorr_trade.ValueAtRisk()),
+      StringFormat("Day Running PL:          %.2f\n\n", autocorr_trade.PLToday()),
+      StringFormat("Num Active Positions:    %i\n", autocorr_trade.NumActivePositions()),
+      StringFormat("Trades Today:            %i\n\n", TRADES_ACTIVE.orders_today),
+      StringFormat("Trade Open:              %s\n", TimeToString(TRADE_QUEUE.curr_trade_open)),
+      StringFormat("Trade Close:             %s\n\n", TimeToString(TRADE_QUEUE.curr_trade_close)),
+      StringFormat("Tick Value:              %.5f\n", autocorr_trade.TICK_VALUE()),
+      StringFormat("Trade Diff Ticks:        %.2f\n", autocorr_trade.TradeDiffPoints()),
+      StringFormat("Trade Diff:              %.5f", autocorr_trade.TradeDiff())
+      
+   
+   );
+
+}
+
 void     LotsStatus() {
    
    autocorr_trade.logger(StringFormat("Pre-Entry \n\nRisk: %.2f \nLot: %.2f \nMax Lot: %.2f",
       autocorr_trade.ValueAtRisk(),
-      autocorr_trade.CalcLot(),
+      autocorr_trade.DAY_VOLUME_ALLOCATION(),
       InpMaxLot), __FUNCTION__, true, InpDebugLogging);
 
 }
@@ -180,7 +212,7 @@ void     EventsInWindow() {
 
    int   events_in_window  = news_events.GetHighImpactNewsInEntryWindow(TRADE_QUEUE.curr_trade_open, TRADE_QUEUE.curr_trade_close);
    
-   autocorr_trade.logger(StringFormat("Entry Window: %s, Num Events: %i",
+   autocorr_trade.logger(StringFormat("Entry Window: %s - %s, Num Events: %i",
       TimeToString(TRADE_QUEUE.curr_trade_open),
       TimeToString(TRADE_QUEUE.curr_trade_close),
       events_in_window), __FUNCTION__, true, InpDebugLogging);
