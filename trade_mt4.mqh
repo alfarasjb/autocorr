@@ -39,9 +39,9 @@ class CAutoCorrTrade : CTradeOps {
       void           DAY_VOLUME_ALLOCATION(double volume)   { day_volume_allocation = volume; }
    
       // MAIN 
-      int            SendOrder();
-      int            SendMarketOrder();
-      int            SendPendingOrder();
+      int            SendOrder(TradeParams &params);
+      int            SendMarketOrder(TradeParams &PARAMS);
+      int            SendPendingOrder() { return -1;};
       int            SendSplitOrder();
       int            CloseOrder();
       double         VolumeSplitScaleFactor(ENUM_ORDER_SEND_METHOD);
@@ -57,17 +57,27 @@ class CAutoCorrTrade : CTradeOps {
       double         PLToday();
       double         EntryCandleOpen();
       int            ShiftToEntry();
+      int            Stage();
+      int            ExecuteLayer();
+      TradeParams    SetTradeParameters(ENUM_ORDER_SEND_METHOD method, TradeLayer &layer);
+      ENUM_LAYER     LayerType(string trade_comment);
+      int            ManageLayers();
+      int            CloseSecondaryLayers();
+      int            ClosePrimaryLayers();
+      int            UpdateActiveTrades(ActivePosition &pool[]);
+      int            TrailStop(ActivePosition &pool[]);
       
       double         ValueAtRisk();
       double         TradeDiff();
       double         TradeDiffPoints();
+      double         TradePoints(int ticks);
    
       // LOGIC
       ENUM_DIRECTION    TradeDirection();
       ENUM_ORDER_TYPE   TradeOrderType();
       
-      TradeParams       TradeParamsLong(ENUM_ORDER_SEND_METHOD method);
-      TradeParams       TradeParamsShort(ENUM_ORDER_SEND_METHOD method);
+      TradeParams       TradeParamsLong(ENUM_ORDER_SEND_METHOD method, TradeLayer &layer);
+      TradeParams       TradeParamsShort(ENUM_ORDER_SEND_METHOD method, TradeLayer &layer);
       
       
       // TRADE QUEUE 
@@ -79,12 +89,16 @@ class CAutoCorrTrade : CTradeOps {
       // TRADES ACTIVE 
       void           AddOrderToday();
       void           ClearOrdersToday();
-      void           AppendActivePosition(ActivePosition &active_position);
+      void           AppendActivePosition(ActivePosition &position, ActivePosition &array[]);
       int            NumActivePositions();
-      bool           TradeInPool(int ticket);
-      int            RemoveTradeFromPool(int ticket);
+      bool           TradeInPool(int ticket, ActivePosition &pool[]);
+      int            RemoveTradeFromPool(int ticket, ActivePosition &pool[]);
       void           ClearPositions();
       bool           TradeIsOpen(int ticket);
+      int            NumPrimaryLayers();
+      int            NumSecondaryLayers();
+      int            UpdateLayers();
+      
       
       // UTILITIES
       int            logger(string message, string function, bool notify = false, bool debug = false);
@@ -127,6 +141,8 @@ void              CAutoCorrTrade::SetRiskProfile(void) {
    RISK_PROFILE.RP_timeframe           = InpRPTimeframe;   
    RISK_PROFILE.RP_market_split        = InpRPMarketSplit;
    RISK_PROFILE.RP_trade_logic         = InpRPTradeLogic;
+   RISK_PROFILE.RP_positions           = InpRPPositions;
+   RISK_PROFILE.RP_layer_orders        = InpRPLayerOrders;
 }
 
 void              CAutoCorrTrade::SetTradeWindow(datetime trade_datetime) {
@@ -139,6 +155,7 @@ void              CAutoCorrTrade::SetTradeWindow(datetime trade_datetime) {
    TRADES_ACTIVE.trade_open_datetime      = trade_datetime;
    TRADES_ACTIVE.trade_close_datetime     = StructToTime(trade_close_struct);
 }
+
 
 double            CAutoCorrTrade::PLToday(void) {
 
@@ -178,6 +195,95 @@ void              CAutoCorrTrade::ReBalance(void) {
 
 }
 
+int               CAutoCorrTrade::ManageLayers(void) {
+
+   int closed_secondary = 0;
+   int closed_primary = 0;
+   switch(InpLayerManagement) {
+      case MODE_SECURE:
+         // close secondary layers in profit
+         // close primary layers at deadline 
+         closed_secondary  = CloseSecondaryLayers(); 
+         closed_primary    = ClosePrimaryLayers(); // closes primary layers at deadline 
+         break;
+      case MODE_RUNNER:
+         // close secondary on deadline only
+         if (TimeCurrent() >= TRADES_ACTIVE.trade_close_datetime) {
+            closed_secondary = CloseSecondaryLayers(); 
+            logger(StringFormat("%i Trades Modified", TrailStop(TRADES_ACTIVE.primary_layers)), __FUNCTION__);
+         }
+         break;
+      default:
+         break;
+   }
+   UpdateActiveTrades(TRADES_ACTIVE.active_positions);
+   UpdateActiveTrades(TRADES_ACTIVE.primary_layers);
+   UpdateActiveTrades(TRADES_ACTIVE.secondary_layers);
+   return 0; 
+
+}
+
+int               CAutoCorrTrade::CloseSecondaryLayers(void) {
+   
+   int secondary_layers = NumSecondaryLayers(); 
+   int closed = 0;
+   for (int i = 0; i < secondary_layers; i++) {
+      ActivePosition pos = TRADES_ACTIVE.secondary_layers[i]; 
+      int s = OP_OrderSelectByTicket(pos.pos_ticket); 
+      if (PosProfit() < 0 && TimeCurrent() < TRADES_ACTIVE.trade_close_datetime) continue;
+      int c = OP_CloseTrade(pos.pos_ticket);
+      if (c) { 
+         logger(StringFormat("Closed Secondary: %i.", 
+            pos.pos_ticket), __FUNCTION__);
+         closed++;
+         
+      }
+      
+   }
+   if (closed == secondary_layers) {
+      ArrayFree(TRADES_ACTIVE.secondary_layers);
+      ArrayResize(TRADES_ACTIVE.secondary_layers, 0);
+   }
+   return closed;
+}
+
+
+int               CAutoCorrTrade::ClosePrimaryLayers(void) {
+   
+   if (TimeCurrent() < TRADES_ACTIVE.trade_close_datetime) return 0;
+   
+   int primary_layers   = NumPrimaryLayers(); 
+   
+   int closed = 0;
+   
+   for (int i = 0; i < primary_layers; i ++) {
+      ActivePosition pos   = TRADES_ACTIVE.primary_layers[i];
+      if (!TradeIsOpen(pos.pos_ticket)) continue;
+      int c = OP_CloseTrade(pos.pos_ticket);
+      if (c) {
+         logger(StringFormat("Closed Primary: %i", pos.pos_ticket), __FUNCTION__);
+      }
+           
+   
+   }
+   return closed;
+}
+
+int               CAutoCorrTrade::UpdateActiveTrades(ActivePosition &pool[]) {
+
+   int num_active    = ArraySize(pool);
+   ActivePosition dummy[];
+   ArrayCopy(dummy, pool);
+   
+   for (int i = 0; i < num_active; i++) {
+      
+      ActivePosition pos   = dummy[i];
+      if (TradeIsOpen(pos.pos_ticket)) continue; 
+      RemoveTradeFromPool(pos.pos_ticket, pool);      
+   }
+   return ArraySize(pool); 
+}
+
 int               CAutoCorrTrade::OrdersEA(void) {
 
    int open_positions   =  PosTotal();
@@ -189,47 +295,82 @@ int               CAutoCorrTrade::OrdersEA(void) {
       if (OP_TradeMatch(i)) {
          trades_found++;
          int   ticket   = PosTicket();
-         if (TradeInPool(ticket)) continue;
+         if (TradeInPool(ticket, TRADES_ACTIVE.active_positions)) continue;
          
          ActivePosition pos;
          pos.pos_open_datetime   = PosOpenTime();
          pos.pos_ticket          = ticket;
          pos.pos_deadline        = pos.pos_open_datetime + (UTIL_INTERVAL_CURRENT() * RISK_PROFILE.RP_half_life);
          
-         AppendActivePosition(pos);
+         AppendActivePosition(pos, TRADES_ACTIVE.active_positions);
+         ENUM_LAYER trade_layer  = LayerType(PosComment());
+         
+         switch (trade_layer) {
+            case LAYER_PRIMARY:     AppendActivePosition(pos, TRADES_ACTIVE.primary_layers); break; 
+            case LAYER_SECONDARY:   AppendActivePosition(pos, TRADES_ACTIVE.secondary_layers); break; 
+            default:                break; 
+         }
          ea_positions++;
       }
    
    }
+   
    if (trades_found == 0 && ea_positions == 0 && NumActivePositions() > 0) ClearPositions();
+   if (trades_found > 0 && NumActivePositions() > 0) UpdateLayers();
    return trades_found;
 }
 
+int               CAutoCorrTrade::UpdateLayers(void) {
 
-bool              CAutoCorrTrade::TradeInPool(int ticket) {
+   int   active   = NumActivePositions(); 
+   
+   for (int i = 0; i < active; i ++) {
+      // iterate through each, select ticket, check comment if primary or secondary 
+      ActivePosition pos      = TRADES_ACTIVE.active_positions[i];
+      int s                   = OP_OrderSelectByTicket(pos.pos_ticket); 
+      ENUM_LAYER trade_layer  = LayerType(PosComment()); 
+      if (trade_layer == -1) continue;
+      switch (trade_layer) {
+         case LAYER_PRIMARY: 
+            AppendActivePosition(pos, TRADES_ACTIVE.primary_layers);
+            break;
+         case LAYER_SECONDARY: 
+            AppendActivePosition(pos, TRADES_ACTIVE.secondary_layers);
+            break; 
+         default: 
+            break;
+      }
+   }
+   
+   //PrintFormat("ALL: %i, Num Primary: %i, Num Secondary: %i", NumActivePositions(), NumPrimaryLayers(), NumSecondaryLayers());
+   return 0;
+}
 
-   int   trades_in_pool    =  NumActivePositions();
+bool              CAutoCorrTrade::TradeInPool(int ticket, ActivePosition &pool[]) {
+
+   int   trades_in_pool    =  ArraySize(pool);
    
    for (int i = 0; i < trades_in_pool; i++) {
-      if (ticket == TRADES_ACTIVE.active_positions[i].pos_ticket) return true;
+      if (ticket == pool[i].pos_ticket) return true;
    }
    return false;
 }
 
-int               CAutoCorrTrade::RemoveTradeFromPool(int ticket) {
+int               CAutoCorrTrade::RemoveTradeFromPool(int ticket, ActivePosition &pool[]) {
 
-   int   trades_in_pool    = NumActivePositions();
-   ActivePosition    last_positions[];
+   int   trades_in_pool    = ArraySize(pool);
+   ActivePosition    last_positions[]; // dummy
    
    for (int i = 0; i < trades_in_pool; i++) {
-      if (ticket == TRADES_ACTIVE.active_positions[i].pos_ticket) continue;
+      if (ticket == pool[i].pos_ticket) continue;
+      
       int num_last_positions  =  ArraySize(last_positions);
       ArrayResize(last_positions, num_last_positions + 1);
-      last_positions[num_last_positions]  =  TRADES_ACTIVE.active_positions[i];
+      last_positions[num_last_positions]  =  pool[i];
    }
-   ArrayFree(TRADES_ACTIVE.active_positions);
-   ArrayCopy(TRADES_ACTIVE.active_positions, last_positions);
    
+   ArrayFree(pool); 
+   ArrayCopy(pool, last_positions);
    return ArraySize(last_positions);
 }
 
@@ -238,10 +379,17 @@ void              CAutoCorrTrade::ClearPositions(void) {
    ArrayFree(TRADES_ACTIVE.active_positions);
    ArrayResize(TRADES_ACTIVE.active_positions, 0);
    
+   ArrayFree(TRADES_ACTIVE.primary_layers);
+   ArrayResize(TRADES_ACTIVE.primary_layers, 0);
+   
+   ArrayFree(TRADES_ACTIVE.secondary_layers);
+   ArrayResize(TRADES_ACTIVE.secondary_layers, 0);
 }
 
 void              CAutoCorrTrade::CheckOrderDeadline(void) {
-
+   
+   if (InpLayerManagement == MODE_RUNNER) return;
+   
    int active     = NumActivePositions();
    
    if (active == 0) return; 
@@ -256,13 +404,13 @@ void              CAutoCorrTrade::CheckOrderDeadline(void) {
 
 }
 
-void              CAutoCorrTrade::AppendActivePosition(ActivePosition &active_position) {
-
-   int size    = ArraySize(TRADES_ACTIVE.active_positions);
-   ArrayResize(TRADES_ACTIVE.active_positions, size + 1);
-   TRADES_ACTIVE.active_positions[size]   = active_position;
-   logger(StringFormat("Updated active positions: %i, Ticket: %i", NumActivePositions(), active_position.pos_ticket), __FUNCTION__);
-
+void              CAutoCorrTrade::AppendActivePosition(ActivePosition &position, ActivePosition &array[]) {
+   
+   if (TradeInPool(position.pos_ticket, array)) return;
+   int size    = ArraySize(array);
+   ArrayResize(array, size + 1);
+   array[size]   = position;
+   
 }
 
 bool              CAutoCorrTrade::TradeIsOpen(int ticket) {
@@ -273,8 +421,56 @@ bool              CAutoCorrTrade::TradeIsOpen(int ticket) {
    
 }
 
-int               CAutoCorrTrade::CloseOrder(void) {
 
+int               CAutoCorrTrade::TrailStop(ActivePosition &pool[]) {
+
+   int active  = ArraySize(pool);
+   int num_modified = 0;
+   
+   for (int i = 0; i < active; i++) {
+      int ticket = pool[i].pos_ticket;
+      int s = OP_OrderSelectByTicket(ticket);
+      //if (PosProfit() < 0) {
+      //   int c = OP_CloseTrade(ticket);
+      //   logger(StringFormat("Closed Primary Position in Drawdown: %i", ticket), __FUNCTION__);
+      //}
+      double trade_open_price = PosOpenPrice();
+      double last_open_price  = UTIL_LAST_CANDLE_OPEN();
+      
+      ENUM_ORDER_TYPE   position_order_type = PosOrderType();
+      int c = 0; 
+      double updated_sl = PosSL();
+      double current_sl = updated_sl;
+      
+      double   trail_factor      = InpTrailInterval * TRADE_POINTS(); 
+      
+      switch(position_order_type) {
+      
+         case ORDER_TYPE_BUY:
+            updated_sl  = last_open_price - trail_factor;
+            if (updated_sl <= current_sl) continue;
+            break;
+         case ORDER_TYPE_SELL:
+            updated_sl  = last_open_price + trail_factor;
+            if (updated_sl >= current_sl) continue; 
+            break; 
+         default:
+            continue;       
+      }
+      c = OP_ModifySL(updated_sl);
+      if (c) {
+         logger(StringFormat("Trail Stop Updated. Ticket: %i", ticket), __FUNCTION__, true);
+         num_modified++;
+      }
+      else logger(StringFormat("ERROR UPDATING SL: %i, Current: %s, Target: %s", GetLastError(), UTIL_NORM_PRICE(current_sl), UTIL_NORM_PRICE(updated_sl)), __FUNCTION__);
+   }
+   
+   return num_modified;
+}
+
+int               CAutoCorrTrade::CloseOrder(void) {
+   
+   //if (InpLayerManagement == MODE_RUNNER) return 0;
    if (PosTotal() == 0) return 0;
    int num_active_positions = NumActivePositions(); 
    int tickets[];
@@ -357,26 +553,29 @@ bool              CAutoCorrTrade::IsNewDay(void) {
    
 }
 
-TradeParams       CAutoCorrTrade::TradeParamsLong(ENUM_ORDER_SEND_METHOD method) {
+TradeParams       CAutoCorrTrade::TradeParamsLong(ENUM_ORDER_SEND_METHOD method, TradeLayer &layer) {
    
    TradeParams PARAMS; 
    PARAMS.entry_price   = method == MODE_MARKET ? UTIL_PRICE_ASK() : method == MODE_PENDING ? EntryCandleOpen() : 0;
    PARAMS.sl_price      = PARAMS.entry_price - TradeDiff();
    PARAMS.tp_price      = 0;
-   PARAMS.volume        = CalcLot();
+   PARAMS.volume        = CalcLot() * layer.allocation;
+   PARAMS.order_type    = method == MODE_MARKET ? ORDER_TYPE_BUY : method == MODE_PENDING ? ORDER_TYPE_BUY_LIMIT : -1; 
+   PARAMS.layer         = layer.layer;
    
    return PARAMS;
 
 
 }
-TradeParams       CAutoCorrTrade::TradeParamsShort(ENUM_ORDER_SEND_METHOD method) {
+TradeParams       CAutoCorrTrade::TradeParamsShort(ENUM_ORDER_SEND_METHOD method, TradeLayer &layer) {
    
    TradeParams PARAMS;
    PARAMS.entry_price   = method == MODE_MARKET ? UTIL_PRICE_BID() : method == MODE_PENDING ? EntryCandleOpen() : 0; 
    PARAMS.sl_price      = PARAMS.entry_price + TradeDiff();
    PARAMS.tp_price      = 0;
-   PARAMS.volume        = CalcLot();
-   
+   PARAMS.volume        = CalcLot() * layer.allocation;
+   PARAMS.order_type    = method == MODE_MARKET ? ORDER_TYPE_SELL : method == MODE_PENDING ? ORDER_TYPE_SELL_LIMIT : -1;
+   PARAMS.layer         = layer.layer;
    //Print("Bid: %f, Open: %f", UTIL_PRICE_BID(), UTIL_LAST_CANDLE_OPEN());
    //PrintFormat("RP LOT: %f, Tick Val: %f, Trade Points: %f", RISK_PROFILE.RP_lot, TICK_VALUE(), TRADE_POINTS());
    return PARAMS;
@@ -402,44 +601,97 @@ ENUM_DIRECTION    CAutoCorrTrade::TradeDirection(void) {
 }
 
 
-int               CAutoCorrTrade::SendOrder(void) {
+int               CAutoCorrTrade::SendOrder(TradeParams &params) {
    
    switch(RISK_PROFILE.RP_order_send_method) {
-      case MODE_MARKET:       return SendMarketOrder();
+      case MODE_MARKET:       return SendMarketOrder(params);
       case MODE_PENDING:      return SendPendingOrder();
-      case MODE_SPLIT:        return SendSplitOrder();
       default:                break;
    }
    return 0;
 }
 
-int               CAutoCorrTrade::SendMarketOrder(void) {
-   
-   
-   ENUM_DIRECTION    trade_direction   = TradeDirection();
-   ENUM_ORDER_TYPE   order_type;
-   TradeParams       PARAMS;
-   switch(trade_direction) {
-      case LONG: 
-         order_type  = ORDER_TYPE_BUY;
-         PARAMS      = TradeParamsLong(MODE_MARKET);
+int               CAutoCorrTrade::Stage(void) {
+
+   /*
+      Layer logic here
+   */
+   TradeLayer LAYER;
+   switch(RISK_PROFILE.RP_positions) {
+      
+      case MODE_SINGLE: 
+      
+         
+         LAYER.layer       = LAYER_PRIMARY; 
+         LAYER.allocation  = 1.0; 
+         return SendOrder(SetTradeParameters(RISK_PROFILE.RP_order_send_method, LAYER)); 
          break;
-      case SHORT:
-         order_type  = ORDER_TYPE_SELL;
-         PARAMS      = TradeParamsShort(MODE_MARKET);
-         break;
-      case INVALID:
-         logger("Invalid Direction", __FUNCTION__, false, InpDebugLogging);
-         return -1;  
-      default:
-         // ORDER FAILED 
-         return -1; 
+         
+      case MODE_LAYER: 
+         return ExecuteLayer();
+      default: break; 
+   
    }
    
-   //double volume  = RISK_PROFILE.RP_order_send_method == MODE_SPLIT ? PARAMS.volume * 0.5 : PARAMS.volume;
-   double volume  = PARAMS.volume * VolumeSplitScaleFactor(MODE_MARKET);
+   return 0;
+}
+
+int               CAutoCorrTrade::ExecuteLayer(void) { 
+   int orders_executed = 0;
+   // EXECUTE PRIMARY 
+   TradeLayer  PRIMARY;
+   PRIMARY.layer        = LAYER_PRIMARY;
+   PRIMARY.allocation   = InpPrimaryAllocation;
    
-   int ticket     = OP_OrderOpen(Symbol(), order_type, volume, PARAMS.entry_price, PARAMS.sl_price, PARAMS.tp_price, EA_ID, InpMagic);
+   TradeParams PRIMARY_PARAMS    = SetTradeParameters(RISK_PROFILE.RP_order_send_method, PRIMARY);
+   
+   int primary_ticket   = SendOrder(PRIMARY_PARAMS);
+   
+   if (primary_ticket < 0) return -1; // SEND PRIMARY
+   // APPEND TO PRIMARY LIST 
+   orders_executed++;
+   
+   int remaining_layers    = InpNumLayers - 1;
+   double splits           = (1 - PRIMARY.allocation) / remaining_layers; // allocation for each remaining layer
+   // EXECUTE SECONDARY
+   for (int i = 0; i < InpNumLayers - 1; i ++) {
+      TradeLayer  SECONDARY;
+      SECONDARY.layer      = LAYER_SECONDARY; 
+      SECONDARY.allocation = splits; 
+      
+      if (SendOrder(SetTradeParameters(RISK_PROFILE.RP_order_send_method, SECONDARY)) < 0) return -1;
+      orders_executed++;      
+   }
+   PrintFormat("PRIMARY SIZE: %i, LAYER SIZE: %i", ArraySize(TRADES_ACTIVE.primary_layers), ArraySize(TRADES_ACTIVE.secondary_layers));
+   return orders_executed;
+}
+
+TradeParams       CAutoCorrTrade::SetTradeParameters(ENUM_ORDER_SEND_METHOD method, TradeLayer &layer) {
+   
+   ENUM_DIRECTION    trade_direction   = TradeDirection(); 
+   TradeParams PARAMS; 
+   switch(trade_direction) {
+      case LONG: 
+         return TradeParamsLong(method, layer);
+         break;
+      case SHORT:
+         return TradeParamsShort(method, layer);
+         break;
+      case INVALID: 
+         logger("Invalid Direction", __FUNCTION__, false, InpDebugLogging);
+         break; 
+      default:
+         break;
+   }
+   return PARAMS;
+}
+
+int               CAutoCorrTrade::SendMarketOrder(TradeParams &PARAMS) {
+   
+   string   layer_identifier  = PARAMS.layer == LAYER_PRIMARY ? "PRIMARY" : "SECONDARY";
+   string   comment           = StringFormat("%s_%s", EA_ID, layer_identifier);
+   
+   int ticket     = OP_OrderOpen(Symbol(), (ENUM_ORDER_TYPE)PARAMS.order_type, PARAMS.volume, PARAMS.entry_price, PARAMS.sl_price, PARAMS.tp_price, comment, InpMagic);
    
    if (ticket == -1) {
       logger(StringFormat("ORDER SEND FAILED. ERROR: %i", GetLastError()), __FUNCTION__, true);
@@ -452,11 +704,31 @@ int               CAutoCorrTrade::SendMarketOrder(void) {
    pos.pos_open_datetime   =  TRADES_ACTIVE.trade_open_datetime;
    pos.pos_deadline        =  TRADES_ACTIVE.trade_close_datetime;
    pos.pos_ticket          =  ticket;
-   AppendActivePosition(pos);
+   pos.layer               =  PARAMS.layer;
    
+   AppendActivePosition(pos, TRADES_ACTIVE.active_positions);
+   
+   switch(PARAMS.layer) {
+      case LAYER_PRIMARY:     AppendActivePosition(pos, TRADES_ACTIVE.primary_layers); break;
+      case LAYER_SECONDARY:   AppendActivePosition(pos, TRADES_ACTIVE.secondary_layers); break;
+      default: break;
+   }
+   
+   logger(StringFormat("Updated active positions: %i, Ticket: %i", NumActivePositions(), pos.pos_ticket), __FUNCTION__);
    AddOrderToday();
+   
    return ticket; 
 }
+
+ENUM_LAYER        CAutoCorrTrade::LayerType(string trade_comment) {
+   
+   if (StringFind(trade_comment, "PRIMARY") >= 0) return LAYER_PRIMARY; 
+   if (StringFind(trade_comment, "SECONDARY") >= 0) return LAYER_SECONDARY;
+   return -1;
+}
+
+
+/*
 int               CAutoCorrTrade::SendPendingOrder(void) {
 
    ENUM_DIRECTION    trade_direction   = TradeDirection();
@@ -480,7 +752,6 @@ int               CAutoCorrTrade::SendPendingOrder(void) {
          return -1;
    }
    
-   //double volume  = RISK_PROFILE.RP_order_send_method == MODE_SPLIT ? PARAMS.volume * 0.5 : CalcLot();
    double volume  = PARAMS.volume * VolumeSplitScaleFactor(MODE_PENDING);
    
    int ticket  = OP_OrderOpen(Symbol(), order_type, volume, PARAMS.entry_price, PARAMS.sl_price, PARAMS.tp_price, EA_ID, InpMagic);
@@ -495,7 +766,8 @@ int               CAutoCorrTrade::SendPendingOrder(void) {
    pos.pos_open_datetime   =  TRADES_ACTIVE.trade_open_datetime;
    pos.pos_deadline        =  TRADES_ACTIVE.trade_close_datetime;
    pos.pos_ticket          =  ticket;
-   AppendActivePosition(pos);
+   
+   AppendActivePosition(pos, TRADES_ACTIVE.active_positions);
    
    AddOrderToday();
    return ticket;
@@ -508,7 +780,7 @@ int               CAutoCorrTrade::SendSplitOrder(void) {
    if (market_ticket > 1 && pending_ticket > 1) return 1;
    return -1;  
 }
-
+*/
 int               CAutoCorrTrade::logger(string message,string function,bool notify=false,bool debug=false) {
    if (!InpTerminalMsg && !debug) return -1;
    
@@ -532,7 +804,7 @@ bool              CAutoCorrTrade::notification(string message) {
    return n;
 } 
 
-
+/*
 double            CAutoCorrTrade::VolumeSplitScaleFactor(ENUM_ORDER_SEND_METHOD method) {
 
    if (RISK_PROFILE.RP_order_send_method != MODE_SPLIT) return 1; 
@@ -545,7 +817,7 @@ double            CAutoCorrTrade::VolumeSplitScaleFactor(ENUM_ORDER_SEND_METHOD 
    return 0;
 
 }
-
+*/
 
 bool           CAutoCorrTrade::CorrectPeriod(void) {
 
@@ -597,6 +869,8 @@ int            CAutoCorrTrade::ShiftToEntry(void)              { return iBarShif
 double         CAutoCorrTrade::EntryCandleOpen(void)           { return iOpen(Symbol(), PERIOD_CURRENT, ShiftToEntry()); }
 
 int            CAutoCorrTrade::NumActivePositions(void)        { return ArraySize(TRADES_ACTIVE.active_positions); }
+int            CAutoCorrTrade::NumPrimaryLayers(void)          { return ArraySize(TRADES_ACTIVE.primary_layers); }
+int            CAutoCorrTrade::NumSecondaryLayers(void)        { return ArraySize(TRADES_ACTIVE.secondary_layers); }
 
 double         CAutoCorrTrade::PreviousDayTradeDiff(void)      { return UTIL_PREVIOUS_DAY_CLOSE() - UTIL_PREVIOUS_DAY_OPEN();}
 void           CAutoCorrTrade::errors(string error_message)    { Print("ERROR: ", error_message); }

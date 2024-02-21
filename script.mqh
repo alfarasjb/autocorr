@@ -46,7 +46,7 @@ int OnInit()
    
    autocorr_trade.CheckOrderDeadline();
    autocorr_trade.OrdersEA();
-   if (autocorr_trade.ValidTradeOpen() && !news_events.HighImpactNewsInEntryWindow())  autocorr_trade.SendOrder();
+   if (autocorr_trade.ValidTradeOpen() && !news_events.HighImpactNewsInEntryWindow())  autocorr_trade.Stage();
    ShowComments();
    return(INIT_SUCCEEDED);
    
@@ -96,16 +96,17 @@ LOOP FUNCTIONS
             (string)BacktestEventsInWindow), __FUNCTION__, false, InpDebugLogging);
          
          if (!BacktestEventsInWindow && !EventsInEntryWindow) {
-            int order_send_result      = autocorr_trade.SendOrder();
+            int order_send_result      = autocorr_trade.Stage();
             
          }
       }
       
       else {
-         bool ValidTradeClose = autocorr_trade.ValidTradeClose();
-         if (ValidTradeClose) {
-            autocorr_trade.CloseOrder();
-         }
+         autocorr_trade.ManageLayers();
+         //bool ValidTradeClose = autocorr_trade.ValidTradeClose();
+         //if (ValidTradeClose) {
+         //   autocorr_trade.CloseOrder();
+         //}
       }
       autocorr_trade.SetNextTradeWindow();
       autocorr_trade.CheckOrderDeadline();
@@ -118,6 +119,8 @@ LOOP FUNCTIONS
       
       if (autocorr_trade.IsNewDay()) { 
          autocorr_trade.ClearOrdersToday();
+         autocorr_trade.CloseOrder();
+         //autocorr_trade.Close
          // REBALANCE HERE 
          // ADD: TRADING WINDOW START HOUR
          
