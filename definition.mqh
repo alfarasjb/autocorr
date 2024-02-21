@@ -62,14 +62,14 @@ struct RiskProfile {
 
 struct TradeLayer {
    ENUM_LAYER  layer;
-   float    allocation;
+   double      allocation;
 };
 
 struct ActivePosition {
 
    datetime    pos_open_datetime, pos_deadline; 
    int         pos_ticket;
-   ENUM_LAYER  layer;
+   TradeLayer  layer;
 
 };
 
@@ -80,7 +80,7 @@ struct TradeQueue {
 struct TradeParams {
    double entry_price, sl_price, tp_price, volume;
    int order_type;
-   ENUM_LAYER  layer;
+   TradeLayer  layer; 
 };
 
 struct TradesActive {
@@ -131,6 +131,7 @@ input ENUM_LAYER_ORDERS       InpRPLayerOrders     = MODE_UNIFORM; // RISK PROFI
 
 input string                  InpEntry             = " ========== ENTRY WINDOW =========="; //
 input bool                    InpLoadFromFile      = false; // LOAD FROM FILE
+input string                  InpProfilePath       =  "autocorrelation\\profiles\\autocorrelation.csv"; //PROFILE PATH
 input int                     InpEntryHour         = 0; // ENTRY WINDOW HOUR
 input int                     InpEntryMin          = 0; // ENTRY WINDOW MINUTE
 
