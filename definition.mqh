@@ -52,7 +52,7 @@ enum ENUM_LAYER_MANAGEMENT {
 
 struct RiskProfile {
    double                  RP_amount, RP_lot, RP_market_split;
-   int                     RP_half_life; 
+   int                     RP_half_life, RP_spread; 
    ENUM_TIMEFRAMES         RP_timeframe; 
    ENUM_ORDER_SEND_METHOD  RP_order_send_method;
    ENUM_TRADE_LOGIC        RP_trade_logic;
@@ -128,10 +128,11 @@ input float                   InpRPMarketSplit     = 0.5; // RISK PROFILE: SCALE
 input ENUM_TRADE_LOGIC        InpRPTradeLogic      = MODE_FOLLOW; // RISK PROFILE: TRADE LOGIC
 input ENUM_POSITIONS          InpRPPositions       = MODE_SINGLE; // RISK PROFILE: POSITIONS
 input ENUM_LAYER_ORDERS       InpRPLayerOrders     = MODE_UNIFORM; // RISK PROFILE: LAYER ORDERS
+input int                     InpRPSpreadLimit     = 10; // RISK PROFILE: SPREAD: Spread Required to use market order instead of pending order
 
 input string                  InpEntry             = " ========== ENTRY WINDOW =========="; //
 input bool                    InpLoadFromFile      = false; // LOAD FROM FILE
-input string                  InpProfilePath       =  "autocorrelation\\profiles\\autocorrelation.csv"; //PROFILE PATH
+input string                  InpProfilePath       =  "autocorrelation\\profiles\\profile.csv"; //PROFILE PATH
 input int                     InpEntryHour         = 0; // ENTRY WINDOW HOUR
 input int                     InpEntryMin          = 0; // ENTRY WINDOW MINUTE
 
@@ -141,7 +142,8 @@ input double                  InpPrimaryAllocation = 0.6; // LOT ALLOCATION OF T
 input ENUM_LAYER_MANAGEMENT   InpLayerManagement   = MODE_SECURE; // LAYER MANAGEMENT
 
 input string                  InpRiskMgt           = " ========== RISK MANAGEMENT =========="; 
-input float                   InpRiskAmount        = 1000; // BASE RISK AMOUNT
+input float                   InpAccountDeposit    = 100000; // ACCOUNT DEPOSIT
+input float                   InpAccountRiskPct    = 1; // ACCOUNT RISK PERCENT 
 input float                   InpAllocation        = 1; // ALLOCATION
 input ENUM_TRADE_MANAGEMENT   InpTradeMgt          = MODE_NONE; // TRADE MANAGEMENT
 input float                   InpTrailInterval     = 100; // TRAILING STOP INTERVAL

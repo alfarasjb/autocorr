@@ -10,7 +10,7 @@ class CAutoCorrTrade : public CTradeOps {
       int            entry_hour, entry_minute;
    public: 
       // ACCOUNT PROPERTIES
-      double         ACCOUNT_CUTOFF;
+      double         ACCOUNT_CUTOFF, ACCOUNT_BASE_RISK_AMOUNT; 
    
       // SYMBOL PROPERTIES
       double         tick_value, trade_points, contract_size;
@@ -47,6 +47,10 @@ class CAutoCorrTrade : public CTradeOps {
       
       void           ENTRY_HOUR(int hour)       { entry_hour = hour; }
       void           ENTRY_MINUTE(int minute)   { entry_minute = minute; }
+      
+      void           ACCOUNT_RISK(double amount)            { ACCOUNT_BASE_RISK_AMOUNT = amount; }
+      double         ACCOUNT_RISK()                         { return ACCOUNT_BASE_RISK_AMOUNT; }
+      
    
       // MAIN 
       int            SendOrder(TradeParams &params);
@@ -78,6 +82,7 @@ class CAutoCorrTrade : public CTradeOps {
       int            TrailStop(ActivePosition &pool[]);
       bool           InvalidPriceForPendingOrder(TradeParams &PARAMS);
       bool           TradeIsPending(int ticket);
+      bool           IsOptimalSpread();
       
       double         ValueAtRisk();
       double         TradeDiff();
@@ -188,6 +193,7 @@ void              CAutoCorrTrade::SetRiskProfile(void) {
       ENTRY_MINUTE(InpEntryMin);
    }
    
+   RISK_PROFILE.RP_spread              = InpRPSpreadLimit;
    RISK_PROFILE.RP_order_send_method   = InpRPOrderSendMethod;
    RISK_PROFILE.RP_timeframe           = InpRPTimeframe;   
    RISK_PROFILE.RP_market_split        = InpRPMarketSplit;
@@ -201,7 +207,10 @@ void              CAutoCorrTrade::SetRiskProfile(void) {
       RISK_PROFILE.RP_amount, 
       RISK_PROFILE.RP_lot,
       RISK_PROFILE.RP_half_life), __FUNCTION__);
+      
+     
    InitializeTradeOpsProperties(MAGIC); 
+   ACCOUNT_RISK((InpAccountRiskPct / 100) * InpAccountDeposit);
 }
 
 void              CAutoCorrTrade::SetTradeWindow(datetime trade_datetime) {
@@ -215,6 +224,15 @@ void              CAutoCorrTrade::SetTradeWindow(datetime trade_datetime) {
    TRADES_ACTIVE.trade_close_datetime     = StructToTime(trade_close_struct);
 }
 
+bool              CAutoCorrTrade::IsOptimalSpread(void) {
+   
+   if (UTIL_MARKET_SPREAD() > RISK_PROFILE.RP_spread) return false; 
+   logger(StringFormat("Spread is optimal. Sending market order. Bid: %f, Ask: %f", 
+      UTIL_PRICE_BID(), 
+      UTIL_PRICE_ASK()), __FUNCTION__); 
+   return true;
+
+}
 
 double            CAutoCorrTrade::PLToday(void) {
 
@@ -241,17 +259,18 @@ void              CAutoCorrTrade::ReBalance(void) {
    
    ENUM_DIRECTION direction_today   = TradeDirection();
    
-   logger(StringFormat("Day Start Balance: %f, Day Volume: %f, Day Running PL: %f", 
-      DAY_START_BALANCE(), 
-      DAY_VOLUME_ALLOCATION(), 
-      pl_today), __FUNCTION__, false, InpDebugLogging);
-
-
-   logger(StringFormat("Previous Day Close: %f, Previous Day Open: %f, Direction Today: %s", 
-      UTIL_PREVIOUS_DAY_CLOSE(), 
-      UTIL_PREVIOUS_DAY_OPEN(), 
-      EnumToString(direction_today)), __FUNCTION__, false, InpDebugLogging);
-
+   if (PreEntry()) {
+      logger(StringFormat("Day Start Balance: %f, Day Volume: %f, Day Running PL: %f", 
+         DAY_START_BALANCE(), 
+         DAY_VOLUME_ALLOCATION(), 
+         pl_today), __FUNCTION__, false, InpDebugLogging);
+      
+   
+      logger(StringFormat("Previous Day Close: %f, Previous Day Open: %f, Direction Today: %s", 
+         UTIL_PREVIOUS_DAY_CLOSE(), 
+         UTIL_PREVIOUS_DAY_OPEN(), 
+         EnumToString(direction_today)), __FUNCTION__, false, InpDebugLogging);
+   }
 }
 
 int               CAutoCorrTrade::ManageLayers(void) {
@@ -298,6 +317,8 @@ int               CAutoCorrTrade::CloseSecondaryLayers(void) {
    for (int i = 0; i < secondary_layers; i++) {
       ActivePosition pos = TRADES_ACTIVE.secondary_layers[i]; 
       int s = OP_OrderSelectByTicket(pos.pos_ticket); 
+      
+      // early close -> secure secondary profits
       if (PosProfit() < 0 && TimeCurrent() < TRADES_ACTIVE.trade_close_datetime) continue;
       if (TradeIsPending(pos.pos_ticket)) continue;
       int c = OP_CloseTrade(pos.pos_ticket);
@@ -564,7 +585,7 @@ int               CAutoCorrTrade::CloseOrder(void) {
 }
 double            CAutoCorrTrade::CalcLot(void) {
    
-   double      risk_amount_scale_factor   = InpRiskAmount / RISK_PROFILE.RP_amount; 
+   double      risk_amount_scale_factor   = (ValueAtRisk()) / RISK_PROFILE.RP_amount; 
    double      scaled_lot                 = (RISK_PROFILE.RP_lot * InpAllocation * risk_amount_scale_factor * (1 / TICK_VALUE())); // DO NOT CHANGE
    
    scaled_lot  = scaled_lot > InpMaxLot ? InpMaxLot : scaled_lot; 
@@ -800,13 +821,8 @@ ENUM_LAYER        CAutoCorrTrade::LayerType(string trade_comment) {
 
 int               CAutoCorrTrade::SendPendingOrder(TradeParams &PARAMS) {
 
-   if (InvalidPriceForPendingOrder(PARAMS)) {
-      logger(StringFormat("Invalid Price For Pending Order. Target Price: %f, Bid: %f, Ask: %f. Sending Market Order.", 
-         PARAMS.entry_price, 
-         UTIL_PRICE_BID(), 
-         UTIL_PRICE_ASK()), __FUNCTION__);
-      SendMarketOrder(SetTradeParameters(MODE_MARKET, PARAMS.layer));
-   }
+   if (InvalidPriceForPendingOrder(PARAMS))     return SendMarketOrder(SetTradeParameters(MODE_MARKET, PARAMS.layer));   
+   if (IsOptimalSpread())                       return SendMarketOrder(SetTradeParameters(MODE_MARKET, PARAMS.layer));
    
    string   layer_identifier  = PARAMS.layer.layer == LAYER_PRIMARY ? "PRIMARY" : "SECONDARY";
    string   comment           = StringFormat("%s_%s", EA_ID, layer_identifier); 
@@ -847,10 +863,20 @@ bool              CAutoCorrTrade::InvalidPriceForPendingOrder(TradeParams &PARAM
    ENUM_DIRECTION trade_direction   = TradeDirection();
    switch (trade_direction) {
       case LONG:
-         if (UTIL_PRICE_ASK() < PARAMS.entry_price) return true;
+         if (UTIL_PRICE_ASK() < PARAMS.entry_price) {
+            logger(StringFormat("Invalid Price for pending order. Sending Market Order. Bid: %f, Ask: %f", 
+               UTIL_PRICE_BID(), 
+               UTIL_PRICE_ASK()), __FUNCTION__);
+            return true;
+         }
          break; 
       case SHORT: 
-         if (UTIL_PRICE_BID() > PARAMS.entry_price) return true;
+         if (UTIL_PRICE_BID() > PARAMS.entry_price) {
+            logger(StringFormat("Invalid Price for pending order. Sending Market Order. Bid: %f, Ask: %f", 
+                  UTIL_PRICE_BID(), 
+                  UTIL_PRICE_ASK()), __FUNCTION__);
+            return true;
+         }
          break;
       case INVALID:
          break;  
@@ -961,4 +987,11 @@ void           CAutoCorrTrade::ClearOrdersToday(void)          { TRADES_ACTIVE.o
 
 double         CAutoCorrTrade::TradeDiff(void)                 { return ((RISK_PROFILE.RP_amount) / (RISK_PROFILE.RP_lot * (1 / TRADE_POINTS()))); }
 double         CAutoCorrTrade::TradeDiffPoints(void)           { return (((RISK_PROFILE.RP_amount) / (RISK_PROFILE.RP_lot))); }
-double         CAutoCorrTrade::ValueAtRisk(void)               { return CalcLot() * TradeDiffPoints() * TICK_VALUE(); }
+//double         CAutoCorrTrade::ValueAtRisk(void)               { return CalcLot() * TradeDiffPoints() * TICK_VALUE(); }
+
+double         CAutoCorrTrade::ValueAtRisk(void) {
+
+   double value   = ACCOUNT_RISK(); // * EQUITY SCALING HERE 
+   return value;
+
+}

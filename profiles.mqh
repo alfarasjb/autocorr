@@ -74,9 +74,9 @@ TradeProfile     CProfiles::BuildProfile(void) {
       PrintFormat("%s PROFILE FOUND FOR %s", __FUNCTION__, Symbol());
       TRADE_PROFILE.trade_symbol       = result[0];
       TRADE_PROFILE.trade_open_time    = StringToTime(result[1]); 
-      TRADE_PROFILE.trade_half_life    = (int)result[2];
+      TRADE_PROFILE.trade_lot          = (int)result[2];
       TRADE_PROFILE.trade_risk_percent = (double)result[3] * 100; 
-      TRADE_PROFILE.trade_lot          = (int)result[4];
+      TRADE_PROFILE.trade_half_life    = (int)result[4];      
       TRADE_PROFILE.trade_magic        = (int)result[5];
       
    }
