@@ -22,10 +22,8 @@ CCalendarHistoryLoader     calendar_loader;
 int OnInit()
   {
 //---
-   
    autocorr_trade.SetRiskProfile();
    autocorr_trade.InitializeSymbolProperties();
-   autocorr_trade.InitializeTradeOpsProperties();
    autocorr_trade.ReBalance();
    
    int num_news_data    = news_events.FetchData();
@@ -123,6 +121,7 @@ LOOP FUNCTIONS
          //autocorr_trade.Close
          // REBALANCE HERE 
          // ADD: TRADING WINDOW START HOUR
+         autocorr_trade.ReBalance();
          
       }
       if (autocorr_trade.PreEntry()) {
